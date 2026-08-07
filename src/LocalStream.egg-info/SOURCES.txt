@@ -8,6 +8,10 @@ src/LocalStream.egg-info/top_level.txt
 src/autostart/__init__.py
 src/config/__init__.py
 src/library/__init__.py
+src/library/models.py
+src/library/parser.py
+src/library/scanner.py
+src/library/track_extractor.py
 src/metadata/__init__.py
 src/player/__init__.py
 src/player/mpv_player.py
@@ -21,3 +25,5 @@ src/ui/__init__.py
 src/ui/renderer.py
 src/window/__init__.py
 src/window/window.py
+tests/test_library_parser.py
+tests/test_library_scanner.py

@@ -5,18 +5,21 @@ Full contract: `docs/PROJECT_SPEC.md`.
 
 ## Status
 
-**M2 — Playback core** (see spec Section 12). Currently working:
+**M3 — Library + parsing** (see spec Section 12). Currently working:
 - (M1) GLFW window + OpenGL 3.3 core context, fullscreen boot + `F11` toggle
-- libmpv embedded via the render API (draws into our GL context, not its
-  own native window)
-- Exact seek: ±5s (arrows, hold to repeat), ±10s (J/L), click/drag scrub
-  bar (Section 8)
-- Audio/subtitle track cycling (A/S), subtitle delay ±50ms ([/])
-- Volume (Up/Down) and brightness (Shift+Up/Down) via mpv's video-equalizer
-- No transcoding — plays files at full original quality
+- (M2) libmpv embedded via the render API, exact seek, A/S track cycling,
+  subtitle delay, volume/brightness — see previous status below
+- (M3) `library/` scans the three separate top-level roots (Movies, TV
+  Shows, Anime — Section 3): folder walking, `S01E02`/absolute-number/
+  `(YYYY)` filename parsing, and embedded MKV audio/subtitle language
+  extraction (language + default/forced flags, Section 4c) via a headless
+  mpv instance per file. Builds the Section 2 content model (`Title` /
+  `Season` / `Episode`) with everything TMDB/segments/watch-state
+  touches left for M4/M6/M7 to fill in.
 
-Still not wired up: library scan, metadata, profiles, segment engine/Skip
-Mode, series auto-advance, hover preview. Those are M3+ (Section 12).
+Still not wired up: metadata (TMDB), profiles, segment engine/Skip Mode,
+series auto-advance, hover preview, and there's no UI browsing the scanned
+library yet (that's M5). Those are M4+ (Section 12).
 
 ## Setup (Windows, Python 3.12+)
 
@@ -91,6 +94,48 @@ If step 2 fails (no picture, or audio-only, or an mpv/libmpv error in the
 console), that's almost certainly the DLL step above — tell me the exact
 error and I'll help track it down before we build anything on top of it.
 
-Once playback's confirmed solid, tell me and I'll move on to **M3 —
-Library + parsing** (scan Movies/TV Shows/Anime roots, season/episode/
-absolute-number parsing, MKV track extraction).
+## M3 — Library scan (new)
+
+Test the scanner standalone, no window needed, against your real folders
+(or point it at any three test folders shaped per Section 3):
+
+```powershell
+python src\main.py --scan --movies "D:\Movies" --tv-shows "D:\TV Shows" --anime "D:\Anime"
+```
+
+Add `--no-tracks` to skip MKV track reads (faster, no language data) if
+you just want to sanity-check the folder/filename parsing first. Drop
+whichever of `--movies`/`--tv-shows`/`--anime` you don't have yet — any
+subset works.
+
+It prints every Title found under each of the three roots, with (for
+Movies) the audio languages read off the file, or (for Shows/Anime) the
+season/episode count. Sandbox note: I can run the pure parsing/scanning
+logic myself (`pytest tests/` — 11 tests, all passing, covers folder
+walking, `S01E02`/absolute-number/year parsing, stable IDs across
+re-scans), but not the MKV track-reading path, since that needs the same
+libmpv runtime as M2 and I have no video files or libmpv here. Please run
+the command above against your actual library and confirmion:
+
+1. Every movie folder shows up under **Movies**, with the right year
+   parsed out of `(YYYY)` and the display name it in.
+2. Anime movies (e.g. Spirited Away, sitting in the Movies folder, not a
+   separate Anime subfolder — Section 3) show up in **Movies** too, not
+   Anime — that's correct for M3; the Anime reclassification happens in M4
+   once TMDB metadata lands.
+3. Every show under TV Shows and Anime shows the right season/episode
+   counts, and season-folder shows (`Season 01/…S01E02.mkv`) parse
+   correctly.
+4. Anime with **no** season folder (absolute numbering, e.g. `One Piece -
+   1085.mkv`) still shows up, grouped under a single season.
+5. Without `--no-tracks`: audio languages print for at least one movie
+   with multiple embedded audio tracks, if you have one — confirms the
+   headless-mpv track read actually works (this is the one thing I
+   genuinely can't verify without libmpv in my sandbox).
+6. A file that's corrupt/unreadable (if you have one to test with)
+   doesn't crash the whole scan — it should just get skipped with a
+   warning printed to the console.
+
+Once that's confirmed, tell me and I'll move on to **M4 — Metadata +
+classification** (TMDB matching, poster/backdrop/synopsis/language fetch +
+cache, offline fallback art, anime-movie classification).

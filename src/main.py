@@ -40,6 +40,7 @@ from typing import Optional
 
 import glfw
 
+from library.scanner import LibraryScanner, ScannerConfig
 from player.mpv_player import MpvPlayer
 from player.osd import ScrubBarOSD
 from player.scrub_input import ScrubBarInput
@@ -59,11 +60,71 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=None,
         help="M2 testing hook: a video file to load and play on launch.",
     )
+    parser.add_argument(
+        "--scan",
+        action="store_true",
+        help=(
+            "M3 testing hook: scan --movies/--tv-shows/--anime, print a "
+            "summary of what was found, and exit without opening a window."
+        ),
+    )
+    parser.add_argument("--movies", default=None, help="Movies root (Section 3).")
+    parser.add_argument("--tv-shows", default=None, help="TV Shows root (Section 3).")
+    parser.add_argument("--anime", default=None, help="Anime root (Section 3).")
+    parser.add_argument(
+        "--no-tracks",
+        action="store_true",
+        help="Skip MKV track extraction during --scan (faster, no language data).",
+    )
     return parser.parse_args(argv)
+
+
+def run_scan(args: argparse.Namespace) -> int:
+    """M3 testing hook — scans the given roots and prints a summary, no
+    window/GL/mpv-render-API involved. Real library scanning is triggered
+    from app startup / a Settings "Rescan" action in later milestones, not
+    a CLI flag — this exists so the scanner can be verified standalone
+    before the Home/Detail UI (M5) exists to browse the results in."""
+    config = ScannerConfig(
+        movies_root=args.movies,
+        tv_shows_root=args.tv_shows,
+        anime_root=args.anime,
+        extract_tracks=not args.no_tracks,
+    )
+    if not any([args.movies, args.tv_shows, args.anime]):
+        print("[scan] Pass at least one of --movies/--tv-shows/--anime.", file=sys.stderr)
+        return 1
+
+    def progress(idx: int, total: int, name: str) -> None:
+        print(f"[scan] ({idx + 1}/{total}) {name}", file=sys.stderr)
+
+    library = LibraryScanner(config).scan(progress=progress)
+
+    def describe(title) -> str:  # local import-free duck typing keeps this compact
+        year = f" ({title.year})" if title.year else ""
+        if title.file_path:
+            langs = "/".join(title.audio_languages) or "no audio tracks read"
+            return f"  - {title.display_name}{year} [{langs}]"
+        ep_count = sum(len(s.episodes) for s in title.seasons)
+        return f"  - {title.display_name}{year} — {len(title.seasons)} season(s), {ep_count} episode(s)"
+
+    print(f"\nMovies ({len(library.movies)}):")
+    for t in library.movies:
+        print(describe(t))
+    print(f"\nTV Shows ({len(library.shows)}):")
+    for t in library.shows:
+        print(describe(t))
+    print(f"\nAnime ({len(library.anime)}):")
+    for t in library.anime:
+        print(describe(t))
+    return 0
 
 
 def run(argv: list[str]) -> int:
     args = parse_args(argv)
+
+    if args.scan:
+        return run_scan(args)
 
     window = Window(title="LocalStream", start_fullscreen=args.fullscreen)
     renderer = Renderer(window.framebuffer_size())

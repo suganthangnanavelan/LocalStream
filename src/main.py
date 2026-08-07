@@ -86,6 +86,13 @@ def run(argv: list[str]) -> int:
     window.on_resize = renderer.handle_resize
 
     def handle_key(key: int, scancode: int, action: int, mods: int) -> None:
+        if action == glfw.RELEASE:
+            # Land whatever was accumulated by a held arrow/J/L key now,
+            # rather than waiting on a repeat event that just stopped
+            # arriving — see flush_pending_seek's docstring.
+            if key in (glfw.KEY_LEFT, glfw.KEY_RIGHT, glfw.KEY_J, glfw.KEY_L):
+                player.flush_pending_seek()
+            return
         if action not in (glfw.PRESS, glfw.REPEAT):
             return
 
@@ -100,13 +107,28 @@ def run(argv: list[str]) -> int:
         elif key == glfw.KEY_SPACE and action == glfw.PRESS:
             player.toggle_pause()
         elif key == glfw.KEY_LEFT:
-            player.seek_small(forward=False)
+            # First press: seek immediately for instant response. Held
+            # (REPEAT): queue + throttle so holding doesn't flood mpv with
+            # a seek per ~30-50ms repeat event — see queue_seek_repeat.
+            if action == glfw.PRESS:
+                player.seek_small(forward=False)
+            else:
+                player.queue_seek_repeat(-MpvPlayer.SEEK_SMALL_S)
         elif key == glfw.KEY_RIGHT:
-            player.seek_small(forward=True)
-        elif key == glfw.KEY_J and action == glfw.PRESS:
-            player.seek_big(forward=False)
-        elif key == glfw.KEY_L and action == glfw.PRESS:
-            player.seek_big(forward=True)
+            if action == glfw.PRESS:
+                player.seek_small(forward=True)
+            else:
+                player.queue_seek_repeat(MpvPlayer.SEEK_SMALL_S)
+        elif key == glfw.KEY_J:
+            if action == glfw.PRESS:
+                player.seek_big(forward=False)
+            else:
+                player.queue_seek_repeat(-MpvPlayer.SEEK_BIG_S)
+        elif key == glfw.KEY_L:
+            if action == glfw.PRESS:
+                player.seek_big(forward=True)
+            else:
+                player.queue_seek_repeat(MpvPlayer.SEEK_BIG_S)
         elif key == glfw.KEY_UP and not shift:
             player.adjust_volume(MpvPlayer.VOLUME_STEP)
         elif key == glfw.KEY_DOWN and not shift:
@@ -164,6 +186,11 @@ def run(argv: list[str]) -> int:
     try:
         while not window.should_close():
             window.poll_events()
+
+            # Safety net for queue_seek_repeat: normally a held key's own
+            # REPEAT events flush it, but this catches the case where a
+            # flush is due and no repeat event has arrived yet this tick.
+            player.flush_pending_seek()
 
             # Always clear first. player.render() now unconditionally
             # blits mpv's last painted frame over this every frame (see

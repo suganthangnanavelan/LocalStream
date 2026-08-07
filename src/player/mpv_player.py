@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ctypes
 import sys
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -73,6 +74,8 @@ class MpvPlayer:
     VOLUME_STEP = 5       # 0-100 scale
     BRIGHTNESS_STEP = 5    # -100..100, mpv video-equalizer
     SUBTITLE_DELAY_STEP_S = 0.05  # Section 8: ±50ms
+    SEEK_REPEAT_FLUSH_INTERVAL_S = 0.12  # Section 8: throttle for held-key seeking, see
+                                          # queue_seek_repeat below
 
     def __init__(self) -> None:
         self._mpv = mpv.MPV(
@@ -98,6 +101,16 @@ class MpvPlayer:
             audio_buffer=0.5,        # mpv's default (~80ms) is thin enough that a seek or brief decode
                                        # stall empties it before the pipeline catches back up, which is
                                        # what the "Audio device underrun" warning was flagging.
+            audio_stream_silence="yes",  # Root cause of the "pause ~20s, hit play, one-beat freeze then
+                                       # jumps to a new frame" bug: on Windows (WASAPI) the audio device
+                                       # gets suspended by the OS after a few seconds of silence/pause,
+                                       # so resuming has to reopen it first — that reopen is the stutter,
+                                       # and video_sync=display-resample above then has to resync video
+                                       # against wherever audio lands, which is the frame-jump. Keeping
+                                       # mpv feeding silence to the device instead of stopping it means
+                                       # the device is never closed, so there's nothing to reopen and
+                                       # nothing to resync on resume — this is mpv's documented fix for
+                                       # exactly this failure mode (mpv-player/mpv#13391, #2738).
             osc=False,               # no mpv's own on-screen controller — custom UI draws all of it
             input_default_bindings=False,
             input_vo_keyboard=False,
@@ -155,6 +168,21 @@ class MpvPlayer:
         self._fbo_tex: Optional[int] = None
         self._fbo_w = 0
         self._fbo_h = 0
+
+        # -- held-arrow-key seek throttling ------------------------------
+        #
+        # GLFW's key REPEAT event fires roughly every 30-50ms while a key
+        # is held. seek_small/seek_big used to be called directly off of
+        # that, i.e. one real mpv seek per repeat event — each of which
+        # restarts mpv's demux/decode pipeline. Flooding it with a dozen+
+        # overlapping seeks a second is what made holding an arrow key feel
+        # jerky/non-smooth (the same class of problem the scrub-bar drag
+        # already avoids via commit=False). queue_seek_repeat coalesces
+        # those into one accumulated seek every SEEK_REPEAT_FLUSH_INTERVAL_S
+        # instead, so holding the key still tracks smoothly but mpv only
+        # gets a seek command a few times a second, not on every repeat.
+        self._pending_seek_delta_s = 0.0
+        self._last_seek_flush_time = 0.0
 
     # -- lifecycle --------------------------------------------------------
 
@@ -307,6 +335,27 @@ class MpvPlayer:
 
     def seek_big(self, forward: bool) -> None:
         self._seek_relative_fast(self.SEEK_BIG_S if forward else -self.SEEK_BIG_S)
+
+    def queue_seek_repeat(self, delta_s: float) -> None:
+        """For key-REPEAT events while an arrow/J/L key is held. Accumulates
+        delta_s and only actually issues a seek to mpv every
+        SEEK_REPEAT_FLUSH_INTERVAL_S — see the comment in __init__ for why.
+        A single tap should still call seek_small/seek_big directly for
+        instant response; this is for the hold-repeat case only."""
+        self._pending_seek_delta_s += delta_s
+        now = time.monotonic()
+        if now - self._last_seek_flush_time >= self.SEEK_REPEAT_FLUSH_INTERVAL_S:
+            self.flush_pending_seek()
+
+    def flush_pending_seek(self) -> None:
+        """Sends any accumulated queue_seek_repeat delta to mpv now. Call on
+        key-release (so the last bit held isn't dropped) and once a frame
+        from the main loop (so a flush isn't stranded waiting on a repeat
+        event that stops arriving the moment the key is released)."""
+        if self._pending_seek_delta_s != 0.0:
+            self._seek_relative_fast(self._pending_seek_delta_s)
+            self._pending_seek_delta_s = 0.0
+        self._last_seek_flush_time = time.monotonic()
 
     def seek_absolute(self, position_s: float) -> None:
         self._mpv.seek(position_s, reference="absolute", precision="exact")

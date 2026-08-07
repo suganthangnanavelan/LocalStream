@@ -77,13 +77,26 @@ class MpvPlayer:
         self._mpv = mpv.MPV(
             vid="auto",
             vo="libmpv",             # render-API output: draws into our GL context, not its own window
-            hwdec="no",                # software decode — hw-decode interop with a raw opengl render
-                                         # context isn't reliably supported across driver stacks and was
-                                         # stalling the whole pipeline (both video AND audio) on some GPUs.
-                                         # Revisit once M2 is otherwise stable; correctness over perf for now.
+            hwdec="auto-safe",       # hardware decode with copy-back to system memory before upload.
+                                       # The *zero-copy* hwdec interop (e.g. raw d3d11/opengl texture
+                                       # sharing) isn't reliably supported across driver stacks, but the
+                                       # "-copy" variants auto-safe resolves to (d3d11va-copy on Windows,
+                                       # videotoolbox on macOS, vaapi-copy on Linux) decode on the GPU and
+                                       # hand mpv a normal system-memory frame, so they work through the
+                                       # same GL texture upload path as software decode — just fast enough
+                                       # that the decoder doesn't fall behind on 4K/HEVC sources. Software
+                                       # decode of a 4K file was too slow to keep up in real time, which
+                                       # backed up the demuxer queue and starved audio for the first
+                                       # ~30s (and periodically after) — that was the M2 playback bug.
             cache="yes",
-            demuxer_max_bytes="150MiB",       # matches the readahead this file actually needs — too low
-            demuxer_max_back_bytes="75MiB",   # a cap and the demuxer stalls waiting to make room
+            demuxer_max_bytes="400MiB",        # headroom for 4K/HEVC readahead; 150MiB was tight enough
+            demuxer_max_back_bytes="75MiB",    # that any decode hiccup tripped the "too many packets"
+                                                 # cap and forced a queue refresh/stall.
+            demuxer_readahead_secs=20,          # read further ahead so brief decode hiccups don't starve
+                                                 # audio or cause visible stutter.
+            audio_buffer=0.5,        # mpv's default (~80ms) is thin enough that a seek or brief decode
+                                       # stall empties it before the pipeline catches back up, which is
+                                       # what the "Audio device underrun" warning was flagging.
             osc=False,               # no mpv's own on-screen controller — custom UI draws all of it
             input_default_bindings=False,
             input_vo_keyboard=False,
@@ -172,27 +185,58 @@ class MpvPlayer:
     # -- seeking (Section 8) --------------------------------------------------
 
     def seek_relative(self, delta_s: float) -> None:
-        # "exact" precision: VLC-parity, not keyframe-snapped (Section 1).
+        # Keyframe ("keyframes") precision, not exact, for arrow/J-L taps —
+        # see seek_small/seek_big below for why. Exact remains the default
+        # here since other relative-seek callers may still want frame
+        # accuracy; the fast path is opt-in via seek_relative_fast.
         self._mpv.seek(delta_s, reference="relative", precision="exact")
 
+    def _seek_relative_fast(self, delta_s: float) -> None:
+        # Keyframe-snapped seek: mpv jumps straight to the nearest keyframe
+        # instead of decoding every intermediate frame from there to the
+        # target. That decode-catch-up is exactly what caused the "stuck"
+        # feeling on ±5s/±10s taps — VLC does the same fast/keyframe seek
+        # for quick jumps and only goes frame-exact when you're precisely
+        # scrubbing (that's what the scrub bar's seek_absolute is for).
+        self._mpv.seek(delta_s, reference="relative", precision="keyframes")
+
     def seek_small(self, forward: bool) -> None:
-        self.seek_relative(self.SEEK_SMALL_S if forward else -self.SEEK_SMALL_S)
+        self._seek_relative_fast(self.SEEK_SMALL_S if forward else -self.SEEK_SMALL_S)
 
     def seek_big(self, forward: bool) -> None:
-        self.seek_relative(self.SEEK_BIG_S if forward else -self.SEEK_BIG_S)
+        self._seek_relative_fast(self.SEEK_BIG_S if forward else -self.SEEK_BIG_S)
 
     def seek_absolute(self, position_s: float) -> None:
         self._mpv.seek(position_s, reference="absolute", precision="exact")
 
-    def seek_to_fraction(self, fraction: float) -> None:
+    def _seek_absolute_fast(self, position_s: float) -> None:
+        # Keyframe-snapped absolute seek — same rationale as
+        # _seek_relative_fast. Used for scrub-bar *preview* while actively
+        # dragging: exact-seeking on every mouse-move event (GLFW fires one
+        # per pixel of movement) was flooding mpv with frame-accurate seeks
+        # and causing the jerky/stuttery drag feel. Fast seeks keep the drag
+        # responsive; seek_to_fraction(..., commit=True) on mouse-up still
+        # lands on the exact frame.
+        self._mpv.seek(position_s, reference="absolute", precision="keyframes")
+
+    def seek_to_fraction(self, fraction: float, commit: bool = True) -> None:
         """Used by the scrub bar: click/drag reports 0.0-1.0 across the bar's
-        width, translated to an exact absolute seek (Section 8, Section 5.5's
-        red-zone guard hooks in later at the segment-engine layer, M6)."""
+        width, translated to an absolute seek (Section 8, Section 5.5's
+        red-zone guard hooks in later at the segment-engine layer, M6).
+
+        commit=True (click, or mouse-up after a drag) does a frame-exact
+        seek. commit=False (every intermediate mouse-move while dragging)
+        does a fast keyframe seek so the drag itself stays smooth — see
+        _seek_absolute_fast."""
         duration = self.duration_s
         if duration is None or duration <= 0:
             return
         fraction = max(0.0, min(1.0, fraction))
-        self.seek_absolute(fraction * duration)
+        target = fraction * duration
+        if commit:
+            self.seek_absolute(target)
+        else:
+            self._seek_absolute_fast(target)
 
     @property
     def position_s(self) -> Optional[float]:

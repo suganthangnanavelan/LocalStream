@@ -9,7 +9,7 @@ Responsibilities (M1 scope only):
   - Create a GLFW window with an OpenGL 3.3 core profile context.
   - Boot straight into fullscreen when requested (Section 1 — "Boots
     straight into fullscreen on machine startup"), or windowed otherwise.
-  - Toggle fullscreen <-> windowed at runtime (F11), remembering the
+  - Toggle fullscreen <-> windowed at runtime (F), remembering the
     windowed size/position to restore cleanly.
   - Expose a minimal, typed callback surface (resize, key, mouse) that
     later milestones (UI Renderer, Player Module) hook into, without this
@@ -158,9 +158,10 @@ class Window:
             self.on_resize(width, height)
 
     def _on_glfw_key(self, _handle, key: int, scancode: int, action: int, mods: int) -> None:
-        if key == glfw.KEY_F11 and action == glfw.PRESS:
+        if key == glfw.KEY_F and action == glfw.PRESS:
+            # F is fullscreen toggle, VLC-style. F11 removed — just F now.
             self.toggle_fullscreen()
-            return  # fullscreen toggle is handled here, not forwarded
+            return
         if self.on_key:
             self.on_key(key, scancode, action, mods)
 

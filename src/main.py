@@ -26,9 +26,9 @@ land with M6):
     S              Cycle subtitle track
     [ / ]          Subtitle delay -50ms / +50ms
     Click/drag scrub bar   Exact seek to position
-    F11            Toggle fullscreen (M1)
-    Esc            Quit (M1 placeholder — becomes "back" once there's
-                    somewhere to go back to, M5+)
+    F              Toggle fullscreen (M1)
+    Esc            Exit fullscreen (does not close the app)
+    Alt+F4         Quit (native OS handling)
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import sys
 import traceback
+from typing import Optional
 
 import glfw
 
@@ -91,7 +92,11 @@ def run(argv: list[str]) -> int:
         shift = bool(mods & glfw.MOD_SHIFT)
 
         if key == glfw.KEY_ESCAPE and action == glfw.PRESS:
-            window.request_close()
+            # Esc never closes the app — only exits fullscreen if we're in
+            # it. Closing is Alt+F4 (handled natively by the OS/window
+            # manager; GLFW already turns that into window_should_close).
+            if window.is_fullscreen:
+                window.toggle_fullscreen()
         elif key == glfw.KEY_SPACE and action == glfw.PRESS:
             player.toggle_pause()
         elif key == glfw.KEY_LEFT:
@@ -121,6 +126,8 @@ def run(argv: list[str]) -> int:
 
     window.on_key = handle_key
 
+    _last_drag_fraction: list[Optional[float]] = [None]  # closure state for mouse-up commit
+
     def handle_mouse_button(button: int, action: int, mods: int) -> None:
         if button != glfw.MOUSE_BUTTON_LEFT:
             return
@@ -129,9 +136,15 @@ def run(argv: list[str]) -> int:
         if action == glfw.PRESS:
             fraction = scrub_input.on_mouse_down(win_w, win_h, cx, cy)
             if fraction is not None:
-                player.seek_to_fraction(fraction)
+                player.seek_to_fraction(fraction, commit=True)  # single click: exact, no flood risk
         elif action == glfw.RELEASE:
+            was_dragging = scrub_input.is_dragging
             scrub_input.on_mouse_up()
+            # Drag just ended: land on the exact frame now that the flood
+            # of fast preview seeks (see handle_cursor_pos) has stopped.
+            if was_dragging and _last_drag_fraction[0] is not None:
+                player.seek_to_fraction(_last_drag_fraction[0], commit=True)
+            _last_drag_fraction[0] = None
 
     window.on_mouse_button = handle_mouse_button
 
@@ -139,7 +152,12 @@ def run(argv: list[str]) -> int:
         win_w, win_h = glfw.get_window_size(window.handle)
         fraction = scrub_input.on_mouse_move(win_w, win_h, x)
         if fraction is not None:
-            player.seek_to_fraction(fraction)
+            _last_drag_fraction[0] = fraction
+            # Fast keyframe preview while actively dragging — exact-seeking
+            # on every one of these (fired per pixel of mouse movement) is
+            # what caused the jerky scrub-bar feel. Exact commit happens on
+            # release, above.
+            player.seek_to_fraction(fraction, commit=False)
 
     window.on_cursor_pos = handle_cursor_pos
 

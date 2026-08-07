@@ -1,0 +1,27 @@
+[project]
+name = "LocalStream"
+version = "0.1.0"
+description = "Local streaming-site experience for Movies/TV Shows/Anime — custom OpenGL UI, libmpv playback."
+requires-python = ">=3.12"
+dependencies = [
+    "glfw>=2.7.0",
+    "PyOpenGL>=3.1.7",
+    "PyOpenGL-accelerate>=3.1.7",
+    "python-mpv>=1.0.6",
+    "freetype-py>=2.4.0",
+    "Pillow>=10.0.0",
+    "requests>=2.31.0",
+    "numpy>=1.26.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pyinstaller>=6.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"

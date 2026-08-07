@@ -1,0 +1,11 @@
+autostart
+config
+library
+metadata
+player
+preview
+profiles
+recommendations
+search
+ui
+window

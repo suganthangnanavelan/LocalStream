@@ -165,13 +165,13 @@ def run(argv: list[str]) -> int:
         while not window.should_close():
             window.poll_events()
 
-            # Only clear before video has ever drawn a frame (startup blank
-            # state). Once mpv is producing frames, clearing every frame
-            # regardless of whether mpv had something new caused the black
-            # flashes during seeking — mpv's render() call fully repaints
-            # the frame itself when it has one, so there's nothing to clear.
-            if not player.has_rendered_first_frame:
-                renderer.begin_frame()
+            # Always clear first. player.render() now unconditionally
+            # blits mpv's last painted frame over this every frame (see
+            # mpv_player.py) once video has started, so this only actually
+            # shows through during the pre-video blank state — but clearing
+            # unconditionally (instead of the old has_rendered_first_frame
+            # special-case) keeps this loop simple and is effectively free.
+            renderer.begin_frame()
 
             fb_w, fb_h = window.framebuffer_size()
             player.render(fb_w, fb_h)

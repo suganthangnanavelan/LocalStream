@@ -10,6 +10,7 @@ Requires-Dist: python-mpv>=1.0.6
 Requires-Dist: freetype-py>=2.4.0
 Requires-Dist: Pillow>=10.0.0
 Requires-Dist: requests>=2.31.0
+Requires-Dist: curl_cffi>=0.7.0
 Requires-Dist: numpy>=1.26.0
 Provides-Extra: dev
 Requires-Dist: pyinstaller>=6.0.0; extra == "dev"

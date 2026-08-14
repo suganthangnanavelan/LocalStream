@@ -34,6 +34,7 @@ from library.parser import (
     parse_season_folder,
     parse_year,
 )
+from library.track_cache import TrackCache
 from library.track_extractor import TrackExtractionError, extract_tracks
 
 logger = logging.getLogger(__name__)
@@ -69,11 +70,17 @@ class ScannerConfig:
     tv_shows_root: Optional[str] = None
     anime_root: Optional[str] = None
     extract_tracks: bool = True  # disable in tests to skip spinning up mpv per file
+    # Path to the on-disk track cache (library/track_cache.py). None = no
+    # caching, every scan re-reads every file's tracks via headless mpv
+    # (matches old behaviour; used by tests). Real runs (main.py) always
+    # pass a path so unchanged files skip the headless-mpv read entirely.
+    track_cache_path: Optional[str] = None
 
 
 class LibraryScanner:
     def __init__(self, config: ScannerConfig) -> None:
         self._config = config
+        self._track_cache = TrackCache(config.track_cache_path) if config.track_cache_path else None
 
     # -- public entry point --------------------------------------------
 
@@ -90,6 +97,8 @@ class LibraryScanner:
             library.anime = self._scan_series_root(
                 self._config.anime_root, ContentType.ANIME, progress
             )
+        if self._track_cache is not None:
+            self._track_cache.save()
         return library
 
     # -- Movies -----------------------------------------------------------
@@ -121,15 +130,16 @@ class LibraryScanner:
                 progress(idx, len(entries), name_for_parsing)
 
             parsed = parse_year(name_for_parsing)
+            video_id = make_id(str(video))
             audio_langs: list[str] = []
             sub_langs: list[str] = []
             if self._config.extract_tracks:
-                audio_langs, sub_langs = self._safe_extract_languages(str(video))
+                audio_langs, sub_langs = self._safe_extract_languages(video_id, video)
 
             titles.append(
                 Title(
                     type=ContentType.MOVIE,
-                    id=make_id(str(video)),
+                    id=video_id,
                     display_name=parsed.display_name,
                     sort_name=make_sort_name(parsed.display_name),
                     year=parsed.year,
@@ -239,7 +249,7 @@ class LibraryScanner:
             audio_langs: list[str] = []
             sub_langs: list[str] = []
             if self._config.extract_tracks:
-                audio_langs, sub_langs = self._safe_extract_languages(str(video))
+                audio_langs, sub_langs = self._safe_extract_languages(make_id(str(video)), video)
 
             episodes.append(
                 Episode(
@@ -256,9 +266,20 @@ class LibraryScanner:
 
     # -- shared -------------------------------------------------------------
 
-    def _safe_extract_languages(self, file_path: str) -> tuple[list[str], list[str]]:
+    def _safe_extract_languages(self, file_id: str, video: Path) -> tuple[list[str], list[str]]:
+        mtime = _mtime(video)
         try:
-            info = extract_tracks(file_path)
+            size = video.stat().st_size
+        except OSError:
+            size = -1
+
+        if self._track_cache is not None:
+            cached = self._track_cache.get(file_id, mtime, size)
+            if cached is not None:
+                return cached.audio_languages, cached.subtitle_languages
+
+        try:
+            info = extract_tracks(str(video))
         except TrackExtractionError as exc:
             # One bad/corrupt file must not abort the whole scan (Section
             # 12 M3 intent) — log and continue with empty language lists;
@@ -266,7 +287,11 @@ class LibraryScanner:
             # language-browse/filter data until re-scanned successfully.
             logger.warning("%s", exc)
             return [], []
-        return info.audio_languages(), info.subtitle_languages()
+
+        audio_langs, sub_langs = info.audio_languages(), info.subtitle_languages()
+        if self._track_cache is not None:
+            self._track_cache.set(file_id, mtime, size, audio_langs, sub_langs)
+        return audio_langs, sub_langs
 
 
 def _mtime(path: Path) -> float:

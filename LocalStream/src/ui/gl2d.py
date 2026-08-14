@@ -64,6 +64,32 @@ def _compile_shader(src: str, shader_type) -> int:
     return shader
 
 
+def cover_uv(image_aspect: float, box_w: float, box_h: float) -> tuple[float, float, float, float]:
+    """UV rect that crops `image_aspect` (source width/height) to fill a
+    box of `box_w` x `box_h` without distorting it — the CSS
+    `background-size: cover` / `object-fit: cover` behaviour every poster
+    and backdrop needs and didn't have: textured_rect used to stretch the
+    whole source image into whatever box it was given, which is exactly
+    the "posters and backdrops are stretched" warping in the screenshots.
+    Crops the wider dimension (centered) instead of squashing either
+    axis, so people/faces keep their real proportions."""
+    box_aspect = box_w / max(1e-6, box_h)
+    if image_aspect <= 0:
+        image_aspect = 1.0
+    if image_aspect > box_aspect:
+        # Source is relatively wider than the box — crop its left/right,
+        # keep full height.
+        visible_frac = box_aspect / image_aspect
+        u0 = (1.0 - visible_frac) / 2.0
+        return (u0, 0.0, 1.0 - u0, 1.0)
+    else:
+        # Source is relatively taller than the box — crop its top/bottom,
+        # keep full width.
+        visible_frac = image_aspect / box_aspect
+        v0 = (1.0 - visible_frac) / 2.0
+        return (0.0, v0, 1.0, 1.0 - v0)
+
+
 class Quad2D:
     """Owns the one shader program + one dynamic VBO used for every
     rect/textured-rect/glyph draw in the M5 UI."""
@@ -133,6 +159,24 @@ class Quad2D:
         self._upload_quad(x, y, w, h, (0.0, 0.0, 1.0, 1.0))
         gl.glDrawArrays(gl.GL_TRIANGLES, 0, 6)
 
+    def vertical_gradient(self, x: float, y: float, w: float, h: float,
+                           top_color: tuple[float, float, float, float],
+                           bottom_color: tuple[float, float, float, float],
+                           steps: int = 12) -> None:
+        """Approximates a top-to-bottom gradient with `steps` stacked
+        solid strips, each interpolated between top_color/bottom_color.
+        The shader has no dedicated gradient mode (Section 10's texture-
+        atlas/batching pass is M8/M10, not now) so this is the cheap,
+        correct-enough version used for tile bottom-fades and the Detail
+        backdrop scrim — genuinely smooth by ~10-12 steps at UI sizes."""
+        if h <= 0 or steps <= 0:
+            return
+        strip_h = h / steps
+        for i in range(steps):
+            t = i / max(1, steps - 1)
+            color = tuple(top_color[c] + (bottom_color[c] - top_color[c]) * t for c in range(4))
+            self.rect(x, y + i * strip_h, w, strip_h + 0.5, color)
+
     def textured_rect(self, x: float, y: float, w: float, h: float, texture_id: int,
                        tint: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0),
                        uv: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0)) -> None:
@@ -144,6 +188,16 @@ class Quad2D:
         gl.glUniform1i(self._u_mode, self.MODE_TEXTURED)
         self._upload_quad(x, y, w, h, uv)
         gl.glDrawArrays(gl.GL_TRIANGLES, 0, 6)
+
+    def textured_rect_cover(self, x: float, y: float, w: float, h: float, texture_id: int,
+                             image_aspect: float,
+                             tint: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)) -> None:
+        """Like textured_rect, but crops the source (via cover_uv) to fill
+        the box without stretching — use this for every poster/backdrop/
+        thumbnail draw; reserve plain textured_rect for glyph-adjacent
+        cases where the source is already the exact box aspect (or is a
+        1x1 placeholder, where UV cropping is moot)."""
+        self.textured_rect(x, y, w, h, texture_id, tint=tint, uv=cover_uv(image_aspect, w, h))
 
     def glyph(self, x: float, y: float, w: float, h: float, texture_id: int,
               color: tuple[float, float, float, float],

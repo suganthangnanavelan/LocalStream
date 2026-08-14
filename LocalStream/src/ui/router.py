@@ -98,13 +98,13 @@ class Router:
         if self.state == ViewState.HOME:
             self.home.on_mouse_move(x, y, viewport_w)
         elif self.state == ViewState.DETAIL and self.detail:
-            self.detail.on_mouse_move(x, y)
+            self.detail.on_mouse_move(x, y, viewport_w, viewport_h)
 
     def on_click(self, x: float, y: float, viewport_w: float, viewport_h: float) -> None:
         if self.state == ViewState.HOME:
             self.home.on_click(x, y, viewport_w)
         elif self.state == ViewState.DETAIL and self.detail:
-            self.detail.on_click(x, y)
+            self.detail.on_click(x, y, viewport_w, viewport_h)
 
     def on_scroll(self, dx: float, dy: float, viewport_w: float, viewport_h: float) -> None:
         if self.state == ViewState.HOME:
@@ -120,6 +120,16 @@ class Router:
             self.open_home()
             return True
         return False
+
+    # -- animation -------------------------------------------------------------
+
+    def tick(self, dt: float) -> None:
+        """Advances per-view animation state (currently: Home's hover-scale
+        easing + tile fade-in, ui/views/home.py). Called once per frame from
+        main.py's render loop regardless of which view is active — cheap
+        no-op for Detail/Player, which don't animate yet."""
+        if self.state == ViewState.HOME:
+            self.home.tick(dt)
 
     # -- render --------------------------------------------------------------
 

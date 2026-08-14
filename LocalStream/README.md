@@ -94,6 +94,42 @@ If step 2 fails (no picture, or audio-only, or an mpv/libmpv error in the
 console), that's almost certainly the DLL step above — tell me the exact
 error and I'll help track it down before we build anything on top of it.
 
+## Fix — startup freeze + re-scanning everything every launch
+
+Two real bugs, fixed:
+
+1. **Blank white "(Not Responding)" window on launch.** `run_browse`
+   (M5's real entry point) ran `build_library()` — the full scan + TMDB
+   enrich pass — synchronously between creating the window and starting
+   the render loop. GLFW never got to poll events or swap a buffer for
+   however long that took, so Windows saw a window painting nothing and
+   not responding to input for the whole scan on a real library. Fixed:
+   the scan+enrich now runs on a background thread (`threading.Thread`)
+   while the render loop keeps polling/painting a small loading screen
+   (`ui/views/loading.py` — wordmark, live status text like "Scanning
+   Inception (12/340)", indeterminate progress bar) so the window is
+   always responsive and visibly alive, then swaps to the real Home once
+   it's done.
+2. **Every launch re-read every file's audio/subtitle tracks.** The
+   scanner spun up a headless mpv instance per video file on *every* run
+   to read embedded MKV track languages — TMDB metadata/art was already
+   cached forever (`metadata/metadata_store.py`), but track reads weren't
+   cached at all, so a big library paid that cost fresh every single
+   launch. Fixed with a new `library/track_cache.py`: same JSON-cache
+   pattern as the metadata store, keyed by file id + mtime + size, so an
+   unchanged file reuses its cached languages and only new/modified files
+   spin up mpv. First run after this fix is unchanged (still has to read
+   everything once); every run after that should be close to instant for
+   the scan step.
+
+Both are covered by `tests/test_track_cache.py`.
+
+Still open, and worth doing next if you want the Netflix feel from the
+screenshots to go further: real poster-fade-in/skeleton loading per tile
+instead of a blocking loading screen at all, hover-preview autoplay
+(M8), and the transitions/polish pass (M10) — happy to scope whichever
+of those you want first.
+
 ## M3 — Library scan (new)
 
 Test the scanner standalone, no window needed, against your real folders

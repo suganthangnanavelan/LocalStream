@@ -49,7 +49,7 @@ import json
 import sys
 import traceback
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import glfw
 
@@ -58,6 +58,8 @@ from metadata.enricher import EnricherConfig, MetadataEnricher
 from player.mpv_player import MpvPlayer
 from player.osd import ScrubBarOSD
 from player.scrub_input import ScrubBarInput
+from ui.gl2d import Quad2D
+from ui.text import FontNotFoundError, TextRenderer
 from ui.renderer import Renderer
 from window.window import Window
 
@@ -291,13 +293,21 @@ def run_enrich(args: argparse.Namespace) -> int:
     return 0
 
 
-def build_library(args: argparse.Namespace):
+def build_library(args: argparse.Namespace, status: Optional[Callable[[str], None]] = None):
     """Shared scan(+enrich) path used by the browse UI (M5+) — same logic
     run_scan/run_enrich already exercise standalone, factored out so
     booting into Home doesn't duplicate it. Returns an empty Library (with
     a printed warning) if no roots are configured, rather than failing —
     an empty Home is a valid, testable state before folders are set up
-    (Settings' first-run folder picker is M9)."""
+    (Settings' first-run folder picker is M9).
+
+    `status`, when given, is called with a short human-readable string on
+    every progress tick (e.g. "Scanning Inception (12/340)") instead of
+    only printing to stderr — this is what lets run_browse's loading
+    screen (below) show live progress while this runs on a background
+    thread. Intentionally just a string callback, not a Qt/GLFW-specific
+    type, so it stays UI-framework-agnostic and callable from a worker
+    thread without touching any GL/window state itself."""
     from library.models import Library  # local import: keeps this helper near its only caller
 
     apply_dev_config(args, load_dev_config(Path(args.config)))
@@ -308,17 +318,30 @@ def build_library(args: argparse.Namespace):
             "library. Real first-run folder setup lands in M9.",
             file=sys.stderr,
         )
+        if status:
+            status("No library folders configured")
         return Library()
+
+    # Track cache lives next to the metadata cache by default — same
+    # ./localstream_cache app-data-ish location, one JSON file per cache
+    # kind. This is the fix for "it re-enriches everything every launch":
+    # unchanged files (same mtime+size as last scan) reuse their cached
+    # audio/subtitle languages instead of spinning up headless mpv again.
+    metadata_cache_path = args.metadata_cache or "./localstream_cache/metadata.json"
+    track_cache_path = str(Path(metadata_cache_path).with_name("track_cache.json"))
 
     scanner_config = ScannerConfig(
         movies_root=args.movies,
         tv_shows_root=args.tv_shows,
         anime_root=args.anime,
         extract_tracks=not args.no_tracks,
+        track_cache_path=track_cache_path,
     )
 
     def scan_progress(idx: int, total: int, name: str) -> None:
         print(f"[scan] ({idx + 1}/{total}) {name}", file=sys.stderr)
+        if status:
+            status(f"Scanning your library… {name} ({idx + 1}/{total})")
 
     library = LibraryScanner(scanner_config).scan(progress=scan_progress)
 
@@ -333,14 +356,19 @@ def build_library(args: argparse.Namespace):
     enricher_config = EnricherConfig(
         tmdb_api_key=args.tmdb_key,
         image_cache_dir=args.image_cache or "./localstream_cache/images",
-        metadata_cache_path=args.metadata_cache or "./localstream_cache/metadata.json",
+        metadata_cache_path=metadata_cache_path,
         enrich_episodes=bool(args.episode_enrich),
     )
 
     def enrich_progress(idx: int, total: int, name: str) -> None:
         print(f"[enrich] ({idx + 1}/{total}) {name}", file=sys.stderr)
+        if status:
+            status(f"Fetching posters & info… {name} ({idx + 1}/{total})")
 
-    return MetadataEnricher(enricher_config).enrich(library, progress=enrich_progress)
+    library = MetadataEnricher(enricher_config).enrich(library, progress=enrich_progress)
+    if status:
+        status("Done")
+    return library
 
 
 def run_browse(args: argparse.Namespace) -> int:
@@ -348,8 +376,25 @@ def run_browse(args: argparse.Namespace) -> int:
     boot straight into the Home/Detail/Player router (Section 9) instead
     of M2's single-file `--file` test harness. `--file` (below, in `run`)
     stays available as a quicker playback-only smoke test that skips
-    scanning entirely."""
+    scanning entirely.
+
+    build_library() (scan + TMDB enrich) used to run right here, on this
+    same thread, before the window ever polled an event or swapped a
+    buffer — on a real library that's a multi-second-to-minutes stall
+    where GLFW has painted nothing and isn't responding to the OS, i.e.
+    exactly the blank-white "(Not Responding)" window this was reported
+    as. Fixed by running it on a background thread while the render loop
+    below keeps polling/painting a small LoadingView (ui/views/loading.py)
+    with live status text, then swapping in the real Router once it's
+    done. The track/metadata caches (library/track_cache.py,
+    metadata/metadata_store.py) mean this whole thing is only slow the
+    *first* time or when files actually changed — a re-run against an
+    unchanged library should reach Home in well under a second."""
+    import threading
+    import time
+
     from ui.router import Router
+    from ui.views.loading import LoadingView
 
     window = Window(title="LocalStream", start_fullscreen=args.fullscreen)
     renderer = Renderer(window.framebuffer_size())
@@ -360,10 +405,80 @@ def run_browse(args: argparse.Namespace) -> int:
     scrub_osd = ScrubBarOSD()
     scrub_input = ScrubBarInput(osd=scrub_osd)
 
-    library = build_library(args)
-    router = Router(library, player)
-
     window.on_resize = renderer.handle_resize
+
+    # -- background scan+enrich, loading screen kept alive meanwhile ----
+    loading_quad = Quad2D()
+    try:
+        loading_text: Optional[TextRenderer] = TextRenderer(loading_quad)
+    except FontNotFoundError as exc:
+        print(f"[ui] {exc}", file=sys.stderr)
+        loading_text = None
+    loading_view = LoadingView(loading_quad, loading_text)
+
+    library_result: list = [None]
+    error_result: list = [None]
+    done = threading.Event()
+
+    def load() -> None:
+        try:
+            library_result[0] = build_library(args, status=loading_view.set_status)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the user below, not swallowed
+            error_result[0] = exc
+        finally:
+            done.set()
+
+    loader_thread = threading.Thread(target=load, name="library-load", daemon=True)
+    loader_thread.start()
+
+    last_t = time.perf_counter()
+    while not done.is_set() and not window.should_close():
+        window.poll_events()
+        now = time.perf_counter()
+        loading_view.tick(now - last_t)
+        last_t = now
+
+        renderer.begin_frame()
+        fb_w, fb_h = window.framebuffer_size()
+        loading_quad.begin_frame(fb_w, fb_h)
+        loading_view.render(fb_w, fb_h)
+        renderer.render()
+        window.swap_buffers()
+
+    if window.should_close():
+        # User closed the window during the initial scan — don't wait on
+        # the loader thread (it's a daemon; process exit reaps it) and
+        # don't bother constructing a Router for a library nobody will see.
+        player.shutdown()
+        window.terminate()
+        return 0
+
+    loader_thread.join()
+    if error_result[0] is not None:
+        # Scan/enrich blew up somewhere main.py couldn't already catch
+        # per-item (Section 12's per-title resilience only covers TMDB/
+        # track-read failures, not e.g. a bad config path) — surface it
+        # instead of silently hanging on a loading screen forever, but
+        # still let people quit cleanly rather than a raw traceback-only
+        # crash with an unresponsive window behind it.
+        traceback.print_exception(error_result[0])
+        loading_view.set_status("Something went wrong loading your library — see console. Press Esc to quit.")
+        while not window.should_close():
+            window.poll_events()
+            if glfw.get_key(window.handle, glfw.KEY_ESCAPE) == glfw.PRESS:
+                break
+            renderer.begin_frame()
+            fb_w, fb_h = window.framebuffer_size()
+            loading_quad.begin_frame(fb_w, fb_h)
+            loading_view.render(fb_w, fb_h)
+            renderer.render()
+            window.swap_buffers()
+        player.shutdown()
+        window.terminate()
+        return 1
+
+    library = library_result[0]
+    router = Router(library, player)
 
     def handle_key(key: int, scancode: int, action: int, mods: int) -> None:
         if action == glfw.RELEASE:
@@ -474,9 +589,14 @@ def run_browse(args: argparse.Namespace) -> int:
     window.on_scroll = handle_scroll
 
     try:
+        last_frame_t = time.perf_counter()
         while not window.should_close():
             window.poll_events()
             player.flush_pending_seek()
+
+            now = time.perf_counter()
+            router.tick(now - last_frame_t)
+            last_frame_t = now
 
             renderer.begin_frame()
 

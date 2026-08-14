@@ -20,6 +20,7 @@ from PIL import Image
 class TextureCache:
     def __init__(self) -> None:
         self._by_path: dict[str, int] = {}
+        self._aspect_by_path: dict[str, float] = {}  # width / height, for cover-crop math
         self._placeholder: Optional[int] = None
 
     def _upload(self, rgba_bytes: bytes, width: int, height: int) -> int:
@@ -58,14 +59,27 @@ class TextureCache:
                 img = img.convert("RGBA")
                 data = img.tobytes()
                 tex_id = self._upload(data, img.width, img.height)
+                self._aspect_by_path[path] = img.width / max(1, img.height)
         except (OSError, ValueError):
             tex_id = self.placeholder()
+            self._aspect_by_path[path] = 1.0
         self._by_path[path] = tex_id
         return tex_id
+
+    def get_aspect(self, path: Optional[str]) -> float:
+        """Source image width/height, needed to crop-to-cover instead of
+        stretching (see ui/gl2d.cover_uv). Always call get() for the same
+        path first — this reads the aspect cached during that load rather
+        than re-decoding the file, and defaults to a square (1.0) for a
+        path that's never been loaded so a caller can't crash on ordering."""
+        if not path:
+            return 1.0
+        return self._aspect_by_path.get(path, 1.0)
 
     def invalidate(self, path: str) -> None:
         """Drops a cached texture (e.g. after Admin Mode's Fix Match
         replaces a title's art, M6a) so the next `get()` reloads it."""
         tex_id = self._by_path.pop(path, None)
+        self._aspect_by_path.pop(path, None)
         if tex_id is not None and tex_id != self._placeholder:
             gl.glDeleteTextures([tex_id])

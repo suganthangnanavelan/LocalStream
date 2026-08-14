@@ -1,0 +1,12 @@
+glfw>=2.7.0
+PyOpenGL>=3.1.7
+PyOpenGL-accelerate>=3.1.7
+python-mpv>=1.0.6
+freetype-py>=2.4.0
+Pillow>=10.0.0
+requests>=2.31.0
+curl_cffi>=0.7.0
+numpy>=1.26.0
+
+[dev]
+pyinstaller>=6.0.0

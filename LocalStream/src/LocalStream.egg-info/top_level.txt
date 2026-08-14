@@ -1,0 +1,12 @@
+autostart
+config
+library
+localstream_cache
+metadata
+player
+preview
+profiles
+recommendations
+search
+ui
+window

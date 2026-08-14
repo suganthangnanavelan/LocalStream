@@ -291,6 +291,210 @@ def run_enrich(args: argparse.Namespace) -> int:
     return 0
 
 
+def build_library(args: argparse.Namespace):
+    """Shared scan(+enrich) path used by the browse UI (M5+) — same logic
+    run_scan/run_enrich already exercise standalone, factored out so
+    booting into Home doesn't duplicate it. Returns an empty Library (with
+    a printed warning) if no roots are configured, rather than failing —
+    an empty Home is a valid, testable state before folders are set up
+    (Settings' first-run folder picker is M9)."""
+    from library.models import Library  # local import: keeps this helper near its only caller
+
+    apply_dev_config(args, load_dev_config(Path(args.config)))
+    if not any([args.movies, args.tv_shows, args.anime]):
+        print(
+            "[main] No --movies/--tv-shows/--anime configured (CLI flags or "
+            "localstream.config.json) — booting into Home with an empty "
+            "library. Real first-run folder setup lands in M9.",
+            file=sys.stderr,
+        )
+        return Library()
+
+    scanner_config = ScannerConfig(
+        movies_root=args.movies,
+        tv_shows_root=args.tv_shows,
+        anime_root=args.anime,
+        extract_tracks=not args.no_tracks,
+    )
+
+    def scan_progress(idx: int, total: int, name: str) -> None:
+        print(f"[scan] ({idx + 1}/{total}) {name}", file=sys.stderr)
+
+    library = LibraryScanner(scanner_config).scan(progress=scan_progress)
+
+    if not args.tmdb_key:
+        print(
+            "[main] No --tmdb-key configured — titles will show with "
+            "frame-grabbed fallback art and no synopsis/genre/rating "
+            "until one is added (Section 4).",
+            file=sys.stderr,
+        )
+
+    enricher_config = EnricherConfig(
+        tmdb_api_key=args.tmdb_key,
+        image_cache_dir=args.image_cache or "./localstream_cache/images",
+        metadata_cache_path=args.metadata_cache or "./localstream_cache/metadata.json",
+        enrich_episodes=bool(args.episode_enrich),
+    )
+
+    def enrich_progress(idx: int, total: int, name: str) -> None:
+        print(f"[enrich] ({idx + 1}/{total}) {name}", file=sys.stderr)
+
+    return MetadataEnricher(enricher_config).enrich(library, progress=enrich_progress)
+
+
+def run_browse(args: argparse.Namespace) -> int:
+    """M5's real entry point: scan+enrich the configured library, then
+    boot straight into the Home/Detail/Player router (Section 9) instead
+    of M2's single-file `--file` test harness. `--file` (below, in `run`)
+    stays available as a quicker playback-only smoke test that skips
+    scanning entirely."""
+    from ui.router import Router
+
+    window = Window(title="LocalStream", start_fullscreen=args.fullscreen)
+    renderer = Renderer(window.framebuffer_size())
+
+    player = MpvPlayer()
+    player.init_render_context()
+
+    scrub_osd = ScrubBarOSD()
+    scrub_input = ScrubBarInput(osd=scrub_osd)
+
+    library = build_library(args)
+    router = Router(library, player)
+
+    window.on_resize = renderer.handle_resize
+
+    def handle_key(key: int, scancode: int, action: int, mods: int) -> None:
+        if action == glfw.RELEASE:
+            if key in (glfw.KEY_LEFT, glfw.KEY_RIGHT, glfw.KEY_J, glfw.KEY_L):
+                player.flush_pending_seek()
+            return
+        if action not in (glfw.PRESS, glfw.REPEAT):
+            return
+
+        shift = bool(mods & glfw.MOD_SHIFT)
+
+        if key == glfw.KEY_ESCAPE and action == glfw.PRESS:
+            # Router gets first refusal (Player -> Detail -> Home), same
+            # as Section 8's "Back to Detail View / Esc" — only falls
+            # through to the fullscreen-exit behavior once the router has
+            # nowhere left to go back to.
+            if not router.on_escape() and window.is_fullscreen:
+                window.toggle_fullscreen()
+            return
+
+        if router.state.name != "PLAYER":
+            return  # Home/Detail don't use these playback shortcuts
+
+        if key == glfw.KEY_SPACE and action == glfw.PRESS:
+            player.toggle_pause()
+        elif key == glfw.KEY_LEFT:
+            if action == glfw.PRESS:
+                player.seek_small(forward=False)
+            else:
+                player.queue_seek_repeat(-MpvPlayer.SEEK_SMALL_S)
+        elif key == glfw.KEY_RIGHT:
+            if action == glfw.PRESS:
+                player.seek_small(forward=True)
+            else:
+                player.queue_seek_repeat(MpvPlayer.SEEK_SMALL_S)
+        elif key == glfw.KEY_J:
+            if action == glfw.PRESS:
+                player.seek_big(forward=False)
+            else:
+                player.queue_seek_repeat(-MpvPlayer.SEEK_BIG_S)
+        elif key == glfw.KEY_L:
+            if action == glfw.PRESS:
+                player.seek_big(forward=True)
+            else:
+                player.queue_seek_repeat(MpvPlayer.SEEK_BIG_S)
+        elif key == glfw.KEY_UP and not shift:
+            player.adjust_volume(MpvPlayer.VOLUME_STEP)
+        elif key == glfw.KEY_DOWN and not shift:
+            player.adjust_volume(-MpvPlayer.VOLUME_STEP)
+        elif key == glfw.KEY_UP and shift:
+            player.adjust_brightness(MpvPlayer.BRIGHTNESS_STEP)
+        elif key == glfw.KEY_DOWN and shift:
+            player.adjust_brightness(-MpvPlayer.BRIGHTNESS_STEP)
+        elif key == glfw.KEY_A and action == glfw.PRESS:
+            player.cycle_audio_track()
+        elif key == glfw.KEY_S and action == glfw.PRESS:
+            player.cycle_subtitle_track()
+        elif key == glfw.KEY_LEFT_BRACKET and action == glfw.PRESS:
+            player.adjust_subtitle_delay(-MpvPlayer.SUBTITLE_DELAY_STEP_S)
+        elif key == glfw.KEY_RIGHT_BRACKET and action == glfw.PRESS:
+            player.adjust_subtitle_delay(MpvPlayer.SUBTITLE_DELAY_STEP_S)
+
+    window.on_key = handle_key
+
+    _last_drag_fraction: list[Optional[float]] = [None]
+
+    def handle_mouse_button(button: int, action: int, mods: int) -> None:
+        if button != glfw.MOUSE_BUTTON_LEFT:
+            return
+        win_w, win_h = glfw.get_window_size(window.handle)
+        cx, cy = glfw.get_cursor_pos(window.handle)
+
+        if router.state.name != "PLAYER":
+            if action == glfw.PRESS:
+                router.on_click(cx, cy, win_w, win_h)
+            return
+
+        if action == glfw.PRESS:
+            fraction = scrub_input.on_mouse_down(win_w, win_h, cx, cy)
+            if fraction is not None:
+                player.seek_to_fraction(fraction, commit=True)
+        elif action == glfw.RELEASE:
+            was_dragging = scrub_input.is_dragging
+            scrub_input.on_mouse_up()
+            if was_dragging and _last_drag_fraction[0] is not None:
+                player.seek_to_fraction(_last_drag_fraction[0], commit=True)
+            _last_drag_fraction[0] = None
+
+    window.on_mouse_button = handle_mouse_button
+
+    def handle_cursor_pos(x: float, y: float) -> None:
+        win_w, win_h = glfw.get_window_size(window.handle)
+        if router.state.name != "PLAYER":
+            router.on_mouse_move(x, y, win_w, win_h)
+            return
+        fraction = scrub_input.on_mouse_move(win_w, win_h, x)
+        if fraction is not None:
+            _last_drag_fraction[0] = fraction
+            player.seek_to_fraction(fraction, commit=False)
+
+    window.on_cursor_pos = handle_cursor_pos
+
+    def handle_scroll(dx: float, dy: float) -> None:
+        if router.state.name != "PLAYER":
+            win_w, win_h = glfw.get_window_size(window.handle)
+            router.on_scroll(dx, dy, win_w, win_h)
+
+    window.on_scroll = handle_scroll
+
+    try:
+        while not window.should_close():
+            window.poll_events()
+            player.flush_pending_seek()
+
+            renderer.begin_frame()
+
+            fb_w, fb_h = window.framebuffer_size()
+            if router.state.name == "PLAYER":
+                player.render(fb_w, fb_h)
+                scrub_osd.draw(fb_w, fb_h, player.progress_fraction)
+            router.render(fb_w, fb_h)
+
+            renderer.render()
+            window.swap_buffers()
+    finally:
+        player.shutdown()
+        window.terminate()
+
+    return 0
+
+
 def run(argv: list[str]) -> int:
     args = parse_args(argv)
 
@@ -299,6 +503,9 @@ def run(argv: list[str]) -> int:
 
     if args.scan:
         return run_scan(args)
+
+    if not args.file:
+        return run_browse(args)
 
     window = Window(title="LocalStream", start_fullscreen=args.fullscreen)
     renderer = Renderer(window.framebuffer_size())
@@ -309,14 +516,7 @@ def run(argv: list[str]) -> int:
     scrub_osd = ScrubBarOSD()
     scrub_input = ScrubBarInput(osd=scrub_osd)
 
-    if args.file:
-        player.load(args.file)
-    else:
-        print(
-            "[main] No --file given — window will show a blank frame. "
-            "Pass --file <path-to-video> to test playback.",
-            file=sys.stderr,
-        )
+    player.load(args.file)
 
     window.on_resize = renderer.handle_resize
 

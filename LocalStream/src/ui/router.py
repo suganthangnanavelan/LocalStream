@@ -110,6 +110,29 @@ class Router:
         if self.state == ViewState.HOME:
             self.home.on_scroll(dx, dy, viewport_w, viewport_h)
 
+    # -- press/drag (Section 7c: drag-to-pan a Home shelf) ------------------
+    # A click and a shelf-drag both start as a plain mouse-down, so main.py
+    # always reports the down/move/up sequence here rather than deciding
+    # click-vs-drag itself — HomeView is the one that knows whether the
+    # pointer actually crossed the drag threshold over a shelf.
+
+    def on_mouse_down(self, x: float, y: float, viewport_w: float, viewport_h: float) -> None:
+        if self.state == ViewState.HOME:
+            self.home.begin_press(x, y, viewport_w)
+
+    def on_mouse_drag(self, x: float, y: float, viewport_w: float, viewport_h: float) -> None:
+        if self.state == ViewState.HOME:
+            self.home.drag(x, y, viewport_w)
+        elif self.state == ViewState.DETAIL and self.detail:
+            self.detail.on_mouse_move(x, y, viewport_w, viewport_h)
+
+    def on_mouse_up(self, x: float, y: float, viewport_w: float, viewport_h: float) -> bool:
+        """Returns True if the caller should still fire on_click for this
+        release (it was a tap, not a shelf-panning drag)."""
+        if self.state == ViewState.HOME:
+            return self.home.end_press(x, y, viewport_w)
+        return True
+
     def on_escape(self) -> bool:
         """Returns True if this consumed the Esc press (so main.py's
         fullscreen-toggle handling knows not to also act on it)."""

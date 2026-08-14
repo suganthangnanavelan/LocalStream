@@ -18,6 +18,12 @@ SHELF_LABEL_H = 36
 SHELF_GAP = 28
 SHELF_SIDE_MARGIN = 48
 
+# Netflix-style row "peek" — a shelf-nav arrow click pages by most of a
+# viewport width, not a single tile, so side-scrolling actually feels
+# like paging through the row instead of nudging it.
+SHELF_ARROW_W = 44
+SHELF_PAGE_FRACTION = 0.85
+
 
 @dataclass(frozen=True)
 class TileRect:
@@ -77,6 +83,23 @@ def hit_test_tile(rects: list[TileRect], cursor_x: float, cursor_y: float,
         if rect.x <= cursor_x <= rect.x + rect.w and rect.y <= cursor_y <= rect.y + rect.h:
             return rect.index
     return None
+
+
+def shelf_page_step(viewport_w: float) -> float:
+    """How far a shelf-nav arrow click scrolls the row — most of the
+    visible width, so one click pages to (roughly) the next screenful of
+    posters instead of creeping by a tile or two."""
+    return max(TILE_W, (viewport_w - SHELF_SIDE_MARGIN) * SHELF_PAGE_FRACTION)
+
+
+def shelf_arrow_rects(row_top: float, row_h: float,
+                       viewport_w: float) -> tuple[TileRect, TileRect]:
+    """Left/right nav-arrow hit rects for a shelf row, vertically
+    centered on the poster band (row_top is the tile top, not the
+    shelf's label top)."""
+    left = TileRect(-1, 4.0, row_top, SHELF_ARROW_W, row_h)
+    right = TileRect(-2, viewport_w - SHELF_ARROW_W - 4.0, row_top, SHELF_ARROW_W, row_h)
+    return left, right
 
 
 def shelves_layout(shelf_tile_counts: list[int], top_margin: float = 24.0) -> list[float]:

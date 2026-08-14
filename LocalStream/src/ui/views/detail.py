@@ -39,11 +39,19 @@ EPISODE_ROW_BG = (0.10, 0.10, 0.13, 1.0)
 EPISODE_ROW_HOVER_BG = (0.16, 0.16, 0.20, 1.0)
 SHADOW_COLOR = (0.0, 0.0, 0.0, 0.5)
 
-# Top-right circular close ("×"), Netflix-modal style, replacing the old
-# top-left "< Back" box — matches the reference screenshot instead of
-# looking like a generic app toolbar button.
+# Top-right circular close ("×"), Netflix-modal style — matches the
+# reference screenshot instead of looking like a generic app toolbar
+# button. Paired with a top-left "‹ Back" pill (below) that's always on
+# screen, not hover-only, since this was the #1 reported problem: no
+# obvious way out of a title's Detail page without knowing the Esc
+# shortcut. Esc/Backspace/mouse-back-button (main.py) all still work too.
 CLOSE_BUTTON_SIZE = 40
 CLOSE_BUTTON_MARGIN = 24
+BACK_PILL_MARGIN = 24
+BACK_PILL_H = 40
+BACK_PILL_PAD_X = 18
+BACK_PILL_BG = (0.0, 0.0, 0.0, 0.45)
+BACK_PILL_HOVER_BG = (0.0, 0.0, 0.0, 0.72)
 
 
 class DetailView:
@@ -94,6 +102,11 @@ class DetailView:
         s = CLOSE_BUTTON_SIZE
         return (viewport_w - s - CLOSE_BUTTON_MARGIN, CLOSE_BUTTON_MARGIN, s, s)
 
+    def _back_pill_rect(self) -> tuple[float, float, float, float]:
+        label_w = self._text.measure("‹ Back", 16) if self._text else 60.0
+        w = label_w + BACK_PILL_PAD_X * 2
+        return (BACK_PILL_MARGIN, BACK_PILL_MARGIN, w, BACK_PILL_H)
+
     def _play_button_rect(self, viewport_w: float, viewport_h: float) -> tuple[float, float, float, float]:
         backdrop_h = min(viewport_h * 0.62, viewport_h - 220)
         return (SHELF_SIDE_MARGIN, backdrop_h - 76, 150, 48)
@@ -102,6 +115,10 @@ class DetailView:
                    viewport_h: float = 720) -> Optional[str]:
         cx, cy, cw, ch = self._close_button_rect(viewport_w)
         if cx <= x <= cx + cw and cy <= y <= cy + ch:
+            return "back"
+
+        bx, by, bw, bh = self._back_pill_rect()
+        if bx <= x <= bx + bw and by <= y <= by + bh:
             return "back"
 
         if not self._is_series:
@@ -148,6 +165,7 @@ class DetailView:
                                       SCRIM_MID, SCRIM_BOTTOM, steps=10)
 
         self._draw_close_button(viewport_w)
+        self._draw_back_pill()
 
         # Title/meta/synopsis/Play sit directly over the backdrop's dark
         # lower half — Netflix's actual layout (no separate poster
@@ -213,6 +231,13 @@ class DetailView:
             label = "×"
             lw = self._text.measure(label, 22)
             self._text.draw(label, cx + (cw - lw) / 2.0, cy + 6, 22, TEXT_COLOR)
+
+    def _draw_back_pill(self) -> None:
+        x, y, w, h = self._back_pill_rect()
+        color = BACK_PILL_HOVER_BG if self._hover == "back" else BACK_PILL_BG
+        self._quad.rect(x, y, w, h, color)
+        if self._text:
+            self._text.draw("‹ Back", x + BACK_PILL_PAD_X, y + (h - 16) / 2.0 + 2, 16, TEXT_COLOR)
 
     def _draw_play_button(self, viewport_w: float, viewport_h: float) -> None:
         px, py, pw, ph = self._play_button_rect(viewport_w, viewport_h)

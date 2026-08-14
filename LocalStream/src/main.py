@@ -490,12 +490,15 @@ def run_browse(args: argparse.Namespace) -> int:
 
         shift = bool(mods & glfw.MOD_SHIFT)
 
-        if key == glfw.KEY_ESCAPE and action == glfw.PRESS:
+        if key in (glfw.KEY_ESCAPE, glfw.KEY_BACKSPACE) and action == glfw.PRESS:
             # Router gets first refusal (Player -> Detail -> Home), same
-            # as Section 8's "Back to Detail View / Esc" — only falls
-            # through to the fullscreen-exit behavior once the router has
-            # nowhere left to go back to.
-            if not router.on_escape() and window.is_fullscreen:
+            # as Section 8's "Back to Detail View / Esc" (Backspace is the
+            # same action, Section 8's table lists both) — only falls
+            # through to the fullscreen-exit behavior (Esc only; Backspace
+            # is a no-op once there's nowhere left to go back to) once the
+            # router has nowhere left to go back to.
+            went_back = router.on_escape()
+            if not went_back and key == glfw.KEY_ESCAPE and window.is_fullscreen:
                 window.toggle_fullscreen()
             return
 
@@ -546,14 +549,30 @@ def run_browse(args: argparse.Namespace) -> int:
     _last_drag_fraction: list[Optional[float]] = [None]
 
     def handle_mouse_button(button: int, action: int, mods: int) -> None:
-        if button != glfw.MOUSE_BUTTON_LEFT:
-            return
         win_w, win_h = glfw.get_window_size(window.handle)
         cx, cy = glfw.get_cursor_pos(window.handle)
 
+        # Mouse "back" side-button (common on gaming/productivity mice) —
+        # a free, discoverable way to back out of a Detail/Player view,
+        # same destination as Esc/Backspace (Section 8).
+        if button == glfw.MOUSE_BUTTON_4 and action == glfw.PRESS:
+            if not router.on_escape() and window.is_fullscreen:
+                pass  # mouse back button never touches fullscreen, unlike Esc
+            return
+
+        if button != glfw.MOUSE_BUTTON_LEFT:
+            return
+
         if router.state.name != "PLAYER":
+            # Home's shelves need real drag-to-pan (Section 7c), so a
+            # click is only fired on release, and only if HomeView tells
+            # us the press didn't turn into a shelf drag.
             if action == glfw.PRESS:
-                router.on_click(cx, cy, win_w, win_h)
+                router.on_mouse_down(cx, cy, win_w, win_h)
+            elif action == glfw.RELEASE:
+                was_click = router.on_mouse_up(cx, cy, win_w, win_h)
+                if was_click:
+                    router.on_click(cx, cy, win_w, win_h)
             return
 
         if action == glfw.PRESS:
@@ -572,7 +591,14 @@ def run_browse(args: argparse.Namespace) -> int:
     def handle_cursor_pos(x: float, y: float) -> None:
         win_w, win_h = glfw.get_window_size(window.handle)
         if router.state.name != "PLAYER":
-            router.on_mouse_move(x, y, win_w, win_h)
+            # Query the button live rather than tracking our own flag —
+            # GLFW already knows, and this keeps a drag that started
+            # inside a shelf tracking correctly even across frames.
+            left_down = glfw.get_mouse_button(window.handle, glfw.MOUSE_BUTTON_LEFT) == glfw.PRESS
+            if left_down:
+                router.on_mouse_drag(x, y, win_w, win_h)
+            else:
+                router.on_mouse_move(x, y, win_w, win_h)
             return
         fraction = scrub_input.on_mouse_move(win_w, win_h, x)
         if fraction is not None:
